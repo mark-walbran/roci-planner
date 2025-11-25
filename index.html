@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Roci's Planner</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        /* Hide scrollbar for hourly strip */
+        .scrollbar-hide::-webkit-scrollbar {
+            display: none;
+        }
+        .scrollbar-hide {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-200 min-h-screen p-4 md:p-8">
+
+    <div class="max-w-5xl mx-auto" id="app">
+        <!-- Loading State -->
+        <div class="flex items-center justify-center min-h-[50vh]">
+            <div class="text-center">
+                <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
+                <p class="text-slate-400 font-medium">Forecasting the weekend...</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- Configuration ---
+        const LOCATIONS = [
+            { name: 'Swanage', lat: 50.591509, lon: -2.001570, isCoastal: true }, // Dancing Ledge
+            { name: 'Stanage', lat: 53.346855, lon: -1.632918 }, // Stanage Edge
+            { name: 'Wye Valley', lat: 51.663088, lon: -2.663608 },
+            { name: 'Cardiff', lat: 51.48, lon: -3.18, isCoastal: true },
+            { name: 'Brean Down', lat: 51.323646, lon: -3.021346, isCoastal: true },
+            { name: 'Llanymynech', lat: 52.78, lon: -3.09 },
+            { name: 'Portland', lat: 50.537139, lon: -2.454015 }, 
+            { name: 'Cheddar', lat: 51.2849121585713, lon: -2.7622089288237297},
+            { name: 'Anston', lat: 53.33981106189894, lon: -1.195975992300565},
+            { name: 'Nesscliffe', lat: 52.768778055268506, lon: -2.9144147037413632},
+            { name: 'Forest Rock', lat: 52.72583476817804, lon: -1.2134968551350636},
+            { name: 'Lakes - Bowder', lat: 54.537551204115495, lon:  -3.154248039767869},
+            { name: 'Bath', lat: 51.38013846789521, lon: -2.2938557470821155},
+        ];
+
+        // --- Helper Functions ---
+
+        const getNextSaturday = () => {
+            const d = new Date();
+            const day = d.getDay();
+            const diff = 6 - day + (day === 6 ? 7 : 0);
+            d.setDate(d.getDate() + (day === 6 && diff === 0 ? 7 : diff));
+            d.setHours(0, 0, 0, 0);
+            return d;
+        };
+
+        const getWindDirection = (degrees) => {
+            const directions = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+            const index = Math.round(degrees / 45) % 8;
+            return directions[index];
+        };
+
+        const getWindColor = (speed) => {
+            if (speed < 20) return 'text-green-400';
+            if (speed < 40) return 'text-orange-400';
+            return 'text-red-500';
+        };
+
+        const formatDate = (dateObj) => {
+            return dateObj.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
+        };
+
+        const formatTime = (isoString) => {
+            return new Date(isoString).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+        };
+
+        const isSameDay = (d1, d2) => {
+            return d1.getFullYear() === d2.getFullYear() &&
+                   d1.getMonth() === d2.getMonth() &&
+                   d1.getDate() === d2.getDate();
+        };
+
+        // --- Tide Logic ---
+        const calculateTides = (hourlyData, hourlyTimes, targetDate) => {
+            if (!hourlyData || !hourlyTimes) return { highs: [], lows: [] };
+
+            const highs = [];
+            const lows = [];
+
+            for (let i = 1; i < hourlyData.length - 1; i++) {
+                const current = hourlyData[i];
+                const prev = hourlyData[i - 1];
+                const next = hourlyData[i + 1];
+                const time = hourlyTimes[i];
+
+                if (isSameDay(time, targetDate)) {
+                    if (current > prev && current > next) {
+                        highs.push(formatTime(time.toISOString()));
+                    }
+                    if (current < prev && current < next) {
+                        lows.push(formatTime(time.toISOString()));
+                    }
+                }
+            }
+            return { highs, lows };
+        };
+
+        // --- Ranking Logic ---
+        const calculateScore = (data) => {
+            if (!data || !data.sat || !data.sun) return 1000;
+
+            const avgPrecip = (parseFloat(data.sat.totalPrecip) + parseFloat(data.sun.totalPrecip)) / 2;
+            const avgWind = (data.sat.avgWindSpeed + data.sun.avgWindSpeed) / 2;
+
+            const MAX_PRECIP_THRESHOLD = 15; 
+            const MAX_WIND_THRESHOLD = 50;   
+
+            const nPrecip = Math.min(avgPrecip / MAX_PRECIP_THRESHOLD, 1);
+            const nWind = Math.min(avgWind / MAX_WIND_THRESHOLD, 1);
+
+            // 80% Precip, 20% Wind
+            return (0.8 * nPrecip) + (0.2 * nWind);
+        };
+
+        // --- Data Fetching & Processing ---
+        async function initApp() {
+            const appDiv = document.getElementById('app');
+            const nextSat = getNextSaturday();
+            const nextSun = new Date(nextSat);
+            nextSun.setDate(nextSat.getDate() + 1);
+            
+            const weekendDates = { sat: nextSat, sun: nextSun };
+            const weatherData = {};
+
+            try {
+                // Fetch loop
+                for (const loc of LOCATIONS) {
+                    try {
+                        // Weather API
+                        const weatherUrl = `https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}&hourly=temperature_2m,precipitation_probability,precipitation,cloudcover,windspeed_10m,winddirection_10m,relativehumidity_2m&daily=sunrise,sunset&timezone=Europe%2FLondon&forecast_days=14`;
+                        const weatherRes = await fetch(weatherUrl);
+                        
+                        let marineJson = null;
+
+                        // Marine API
+                        if (loc.isCoastal && weatherRes.ok) {
+                            try {
+                                const marineUrl = `https://marine-api.open-meteo.com/v1/marine?latitude=${loc.lat}&longitude=${loc.lon}&hourly=wave_height,sea_level_height_msl&timezone=Europe%2FLondon&forecast_days=14`;
+                                const marineRes = await fetch(marineUrl);
+                                if (marineRes.ok) {
+                                    marineJson = await marineRes.json();
+                                }
+                            } catch (e) {
+                                console.warn("Marine fetch failed", e);
+                            }
+                        }
+
+                        if (!weatherRes.ok) {
+                            weatherData[loc.name] = null; 
+                        } else {
+                            const json = await weatherRes.json();
+                            const hourly = json.hourly;
+                            const daily = json.daily;
+                            
+                            const hourlyTimes = hourly.time.map(t => new Date(t));
+                            const dailyTimes = daily.time.map(t => new Date(t));
+
+                            const marineTimes = marineJson ? marineJson.hourly.time.map(t => new Date(t)) : null;
+                            const marineSeaLevel = marineJson ? marineJson.hourly.sea_level_height_msl : null;
+                            const marineWaveHeight = marineJson ? marineJson.hourly.wave_height : null;
+
+                            const getDailyStats = (targetDate) => {
+                                const dayIndices = hourlyTimes
+                                    .map((t, i) => (isSameDay(targetDate, t) ? i : -1))
+                                    .filter((i) => i !== -1);
+
+                                if (dayIndices.length === 0) return null;
+
+                                const dailyIndex = dailyTimes.findIndex(t => isSameDay(targetDate, t));
+                                const sunriseStr = dailyIndex !== -1 ? daily.sunrise[dailyIndex] : null;
+                                const sunsetStr = dailyIndex !== -1 ? daily.sunset[dailyIndex] : null;
+                                const sunriseTime = sunriseStr ? new Date(sunriseStr) : null;
+                                const sunsetTime = sunsetStr ? new Date(sunsetStr) : null;
+
+                                // Tide & Wave
+                                let tides = null;
+                                let maxWaveHeight = 0;
+
+                                if (marineJson && marineSeaLevel && marineWaveHeight) {
+                                    tides = calculateTides(marineSeaLevel, marineTimes, targetDate);
+                                    
+                                    marineTimes.forEach((t, i) => {
+                                        if (isSameDay(t, targetDate)) {
+                                            if (sunriseTime && sunsetTime && t >= sunriseTime && t <= sunsetTime) {
+                                                if (marineWaveHeight[i] > maxWaveHeight) {
+                                                    maxWaveHeight = marineWaveHeight[i];
+                                                }
+                                            }
+                                        }
+                                    });
+                                }
+
+                                // Overnight
+                                const nightStart = new Date(targetDate);
+                                nightStart.setDate(targetDate.getDate() - 1);
+                                nightStart.setHours(22, 0, 0, 0);
+                                const nightEnd = new Date(targetDate);
+                                nightEnd.setHours(6, 0, 0, 0);
+
+                                let overnightPrecip = 0;
+                                hourlyTimes.forEach((t, i) => {
+                                    if (t >= nightStart && t < nightEnd) {
+                                        overnightPrecip += hourly.precipitation[i];
+                                    }
+                                });
+
+                                // Daylight
+                                const daylightHours = [];
+                                let maxTemp = -Infinity;
+                                let totalPrecipDay = 0;
+                                let maxPrecipProb = 0;
+                                let totalCloud = 0;
+                                let totalHum = 0;
+                                let totalWindSpeed = 0;
+                                let windDirs = [];
+
+                                dayIndices.forEach((i) => {
+                                    const t = hourlyTimes[i];
+                                    const temp = hourly.temperature_2m[i];
+                                    const precip = hourly.precipitation[i];
+                                    const prob = hourly.precipitation_probability[i];
+                                    const cloud = hourly.cloudcover[i];
+                                    
+                                    if (temp > maxTemp) maxTemp = temp;
+                                    totalPrecipDay += precip;
+                                    if (prob > maxPrecipProb) maxPrecipProb = prob;
+                                    totalCloud += cloud;
+                                    totalHum += hourly.relativehumidity_2m[i];
+                                    totalWindSpeed += hourly.windspeed_10m[i];
+                                    windDirs.push(hourly.winddirection_10m[i]);
+
+                                    if (sunriseTime && sunsetTime && t >= sunriseTime && t <= sunsetTime) {
+                                        daylightHours.push({
+                                            time: t,
+                                            temp: temp,
+                                            precip: precip,
+                                            prob: prob,
+                                            cloud: cloud,
+                                            windSpeed: hourly.windspeed_10m[i],
+                                            windDir: hourly.winddirection_10m[i]
+                                        });
+                                    }
+                                });
+
+                                const count = dayIndices.length;
+                                const avgWindDirDeg = windDirs.reduce((a, b) => a + b, 0) / count;
+
+                                return {
+                                    maxTemp: Math.round(maxTemp),
+                                    totalPrecip: totalPrecipDay.toFixed(1),
+                                    maxPrecipProb,
+                                    avgCloud: Math.round(totalCloud / count),
+                                    avgHum: Math.round(totalHum / count),
+                                    avgWindSpeed: Math.round(totalWindSpeed / count),
+                                    windDir: getWindDirection(avgWindDirDeg),
+                                    sunrise: sunriseStr ? formatTime(sunriseStr) : '--:--',
+                                    sunset: sunsetStr ? formatTime(sunsetStr) : '--:--',
+                                    overnightPrecip: overnightPrecip.toFixed(1),
+                                    daylightHours,
+                                    tides,
+                                    maxWaveHeight: maxWaveHeight.toFixed(1)
+                                };
+                            };
+
+                            weatherData[loc.name] = {
+                                sat: getDailyStats(nextSat),
+                                sun: getDailyStats(nextSun),
+                            };
+                        }
+                    } catch (err) {
+                        console.error(`Error fetching ${loc.name}`, err);
+                        weatherData[loc.name] = null;
+                    }
+                    // Delay to avoid rate limiting
+                    await new Promise(r => setTimeout(r, 200));
+                }
+
+                renderApp(appDiv, weatherData, weekendDates);
+            } catch (err) {
+                appDiv.innerHTML = `
+                    <div class="flex items-center justify-center min-h-[50vh]">
+                        <div class="bg-slate-900 p-8 rounded-lg shadow-md text-center max-w-md border border-slate-800">
+                            <i data-lucide="cloud-rain" class="w-12 h-12 text-red-500 mx-auto mb-4"></i>
+                            <h2 class="text-xl font-bold text-slate-200 mb-2">Oops!</h2>
+                            <p class="text-slate-400">Unable to load forecast data.</p>
+                        </div>
+                    </div>`;
+                lucide.createIcons();
+            }
+        }
+
+        // --- Rendering Functions ---
+
+        function renderApp(container, weatherData, dates) {
+            // Sort locations
+            const sortedLocations = [...LOCATIONS].sort((a, b) => {
+                const dataA = weatherData[a.name];
+                const dataB = weatherData[b.name];
+                const scoreA = calculateScore(dataA);
+                const scoreB = calculateScore(dataB);
+                return scoreA - scoreB;
+            });
+
+            // Generate HTML
+            const html = `
+                <div class="mb-8">
+                    <h1 class="text-3xl font-bold text-white mb-2">Roci's Planner</h1>
+                    <p class="text-slate-400 flex items-center gap-2">
+                        <i data-lucide="calendar" class="w-4 h-4"></i>
+                        Forecast for <span class="font-semibold text-blue-400">${formatDate(dates.sat)}</span> and <span class="font-semibold text-blue-400">${formatDate(dates.sun)}</span>
+                        <span class="ml-2 text-xs bg-blue-900/40 text-blue-300 px-2 py-0.5 rounded-full border border-blue-800">Sorted by Best Weather</span>
+                    </p>
+                </div>
+                <div class="flex flex-col gap-6">
+                    ${sortedLocations.map(loc => renderLocationRow(loc, weatherData[loc.name], dates)).join('')}
+                </div>
+                <div class="mt-12 text-center text-slate-600 text-sm">
+                    Weather data provided by Open-Meteo API
+                </div>
+            `;
+
+            container.innerHTML = html;
+            lucide.createIcons();
+        }
+
+        function renderLocationRow(loc, data, dates) {
+            if (!data) {
+                return `
+                <div class="bg-slate-900 rounded-xl shadow-sm border border-red-900/50 p-6 flex items-center justify-between opacity-75">
+                    <div class="flex items-center gap-3">
+                        <i data-lucide="alert-circle" class="w-5 h-5 text-red-500"></i>
+                        <h2 class="text-lg font-bold text-slate-200">${loc.name}</h2>
+                    </div>
+                    <span class="text-red-400 text-sm font-medium">Data Unavailable</span>
+                </div>`;
+            }
+
+            return `
+            <div class="bg-slate-900 rounded-xl shadow-sm border border-slate-800 overflow-hidden">
+                <div class="bg-slate-800/50 px-6 py-3 border-b border-slate-800 flex items-center gap-2">
+                    <i data-lucide="map-pin" class="w-5 h-5 text-blue-500"></i>
+                    <h2 class="text-lg font-bold text-slate-100">${loc.name}</h2>
+                </div>
+                <div class="flex flex-col lg:flex-row divide-y lg:divide-y-0 lg:divide-x divide-slate-800">
+                    <div class="flex-1">
+                        ${renderDayPanel('Saturday', dates.sat, data.sat)}
+                    </div>
+                    <div class="flex-1">
+                        ${renderDayPanel('Sunday', dates.sun, data.sun)}
+                    </div>
+                </div>
+            </div>`;
+        }
+
+        function renderDayPanel(label, date, stats) {
+            if (!stats) return `<div class="p-6 text-slate-500">No data available</div>`;
+
+            const windColor = getWindColor(stats.avgWindSpeed);
+
+            // Tides / Marine HTML
+            let marineHtml = '';
+            if (stats.tides || (stats.maxWaveHeight && stats.maxWaveHeight > 0)) {
+                let tideContent = '<div class="text-xs text-slate-500 italic">No tidal data available</div>';
+                
+                if (stats.tides && (stats.tides.highs.length > 0 || stats.tides.lows.length > 0)) {
+                    let highStr = stats.tides.highs.length ? `<div><span class="text-slate-400 block mb-0.5">High</span><span class="text-slate-200 font-medium">${stats.tides.highs.join(', ')}</span></div>` : '';
+                    let lowStr = stats.tides.lows.length ? `<div><span class="text-slate-400 block mb-0.5">Low</span><span class="text-slate-200 font-medium">${stats.tides.lows.join(', ')}</span></div>` : '';
+                    tideContent = `<div class="flex gap-4 text-xs">${highStr}${lowStr}</div>`;
+                }
+
+                let waveHtml = '';
+                if (stats.maxWaveHeight > 0) {
+                    waveHtml = `
+                    <div class="flex items-center gap-1.5 text-xs bg-slate-700/50 px-2 py-0.5 rounded text-blue-200">
+                        <i data-lucide="activity" class="w-3 h-3"></i>
+                        <span>Max Wave: <span class="font-bold text-white">${stats.maxWaveHeight}m</span></span>
+                    </div>`;
+                }
+
+                marineHtml = `
+                <div class="mb-4 bg-slate-800/50 rounded p-3 border border-slate-700/50">
+                    <div class="flex items-center justify-between mb-2">
+                        <div class="flex items-center gap-2">
+                            <i data-lucide="waves" class="w-4 h-4 text-blue-400"></i>
+                            <h4 class="text-xs font-bold text-blue-200 uppercase tracking-wider">Marine</h4>
+                        </div>
+                        ${waveHtml}
+                    </div>
+                    ${tideContent}
+                </div>`;
+            }
+
+            // Hourly Strip HTML
+            const hourlyHtml = stats.daylightHours.map(hour => {
+                const hourDisplay = hour.time.getHours();
+                const precipBar = hour.precip > 0 ? 
+                    `<div class="w-full bg-blue-600 absolute bottom-0 left-0" style="height: ${Math.min(hour.precip * 20, 100)}%"></div>` : '';
+                
+                const precipText = hour.precip > 0 ? 
+                    `<span class="text-blue-400">${hour.precip.toFixed(1)}</span>` : 
+                    `<span class="text-slate-700">-</span>`;
+
+                return `
+                <div class="flex flex-col items-center flex-shrink-0 w-10 space-y-1">
+                    <span class="text-[10px] text-slate-500">${hourDisplay}</span>
+                    <span class="text-[10px] font-bold text-slate-300">${Math.round(hour.temp)}°</span>
+                    <div class="h-12 w-full rounded-full bg-yellow-100 relative overflow-hidden flex flex-col justify-end items-center ring-1 ring-yellow-500/20">
+                        <div class="w-full bg-slate-600 absolute top-0 left-0 transition-all" style="height: ${hour.cloud}%; opacity: 0.6"></div>
+                        ${precipBar}
+                    </div>
+                    <div class="text-[10px] font-medium text-center">${precipText}</div>
+                </div>`;
+            }).join('');
+
+            return `
+            <div class="p-6 flex flex-col h-full">
+                <!-- Top Row -->
+                <div class="flex items-start justify-between mb-6">
+                    <div>
+                        <div class="flex items-center gap-2 mb-1">
+                            <span class="font-bold text-slate-100 text-lg">${label}</span>
+                            <span class="text-xs bg-slate-800 px-2 py-0.5 rounded text-slate-400 font-medium border border-slate-700">
+                                ${date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}
+                            </span>
+                        </div>
+                        <div class="flex items-center gap-4 text-sm text-slate-400">
+                            <div class="flex items-center gap-1" title="Sunrise">
+                                <i data-lucide="sunrise" class="w-4 h-4 text-orange-400"></i> ${stats.sunrise}
+                            </div>
+                            <div class="flex items-center gap-1" title="Sunset">
+                                <i data-lucide="sunset" class="w-4 h-4 text-indigo-400"></i> ${stats.sunset}
+                            </div>
+                        </div>
+                    </div>
+                    <div class="text-right">
+                        <div class="text-3xl font-bold text-white">${stats.maxTemp}°</div>
+                        <div class="flex items-center justify-end gap-1 text-xs text-slate-500 mt-1">
+                            <i data-lucide="moon" class="w-3 h-3"></i>
+                            <span title="Precipitation previous night">Overnight: ${stats.overnightPrecip}mm</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Grid Stats -->
+                <div class="grid grid-cols-3 gap-2 mb-6">
+                    <div class="flex flex-col items-center justify-center p-2 rounded bg-blue-900/20 border border-blue-900/30 text-blue-200">
+                        <i data-lucide="droplets" class="w-4 h-4 mb-1"></i>
+                        <span class="text-sm font-bold">${stats.totalPrecip}mm</span>
+                        <span class="text-[10px] opacity-70">${stats.maxPrecipProb}% prob</span>
+                    </div>
+                    <div class="flex flex-col items-center justify-center p-2 rounded bg-slate-800 border border-slate-700">
+                        <i data-lucide="wind" class="w-4 h-4 mb-1 ${windColor}"></i>
+                        <span class="text-sm font-bold ${windColor}">
+                            ${stats.avgWindSpeed}<span class="text-[10px] font-normal text-slate-400 ml-0.5">km/h</span>
+                        </span>
+                        <span class="text-[10px] font-bold text-slate-400">${stats.windDir}</span>
+                    </div>
+                    <div class="flex flex-col items-center justify-center p-2 rounded bg-slate-800 border border-slate-700 text-slate-300">
+                        <i data-lucide="cloud" class="w-4 h-4 mb-1"></i>
+                        <span class="text-sm font-bold">${stats.avgCloud}%</span>
+                        <span class="text-[10px] opacity-70">Cloud</span>
+                    </div>
+                </div>
+
+                ${marineHtml}
+
+                <!-- Hourly Strip -->
+                <div class="mt-auto">
+                    <h4 class="text-xs font-bold text-slate-500 uppercase mb-2 tracking-wider">Daylight Hours</h4>
+                    <div class="flex gap-2 overflow-x-auto pb-2 scrollbar-hide">
+                        ${hourlyHtml}
+                    </div>
+                </div>
+            </div>`;
+        }
+
+        // Start
+        initApp();
+
+    </script>
+</body>
+</html>
